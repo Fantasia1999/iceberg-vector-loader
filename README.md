@@ -11,29 +11,43 @@
 | JDK | 21 |
 | Python | ≥ 3.11 且 < 3.15（3.11 / 3.12 / 3.13 / 3.14） |
 
+入口：`python -m iceberg_vector_loader <命令>`，或 `iceberg-vector-loader <命令>`。
+
+| 命令 | 作用 | 是否需要 JDK / Spark |
+|---|---|---|
+| `convert` | 只把 `.fvecs` 转成 parquet | 否 |
+| `load` | 准备输入并写入 Iceberg v3 表 | 是 |
+| `bootstrap` | 解析 / 下载 JDK 21 和 Spark 3.5.9 | 下载时需要网络 |
+
 ## 架构
 
 ```
-.fvecs / .parquet / parquet 目录
-        │
-        ▼
-  Python 准备输入
-  （fvecs 转 parquet、推断/重命名列；parquet 必须已有 id）
-        │
-        ▼
-  spark-sql + Iceberg 1.11 Java runtime
-  CREATE NAMESPACE / CREATE TABLE (format-version=3) / INSERT
-        │
-        ▼
-  Hadoop catalog
-  <warehouse>/<namespace>/<table>/
+.fvecs                          .parquet / parquet 目录
+   │                                    │
+   ▼                                    │
+convert（可选，只出 parquet）            │
+   │                                    │
+   └──────────────┬─────────────────────┘
+                  ▼
+            load：Python 准备输入
+            （fvecs 先转 parquet；parquet 必须已有 id）
+                  │
+                  ▼
+            spark-sql + Iceberg 1.11 Java runtime
+            CREATE NAMESPACE / CREATE TABLE (format-version=3) / INSERT
+                  │
+                  ▼
+            Hadoop catalog
+            <warehouse>/<namespace>/<table>/
 ```
 
-Python 只做数据准备。建表和 overwrite 由 Spark 的 Iceberg Java writer 完成，因此是满血 V3（含 `next-row-id` 等）。表已存在且未指定 `--overwrite` 时直接退出，不会 append。
+Python 只做数据准备。建表由 Spark 的 Iceberg Java writer 完成，因此是满血 V3（含 `next-row-id` 等）。表已存在且未指定 `--overwrite` 时直接退出，不会 append。
 
 ## 安装
 
 ### Python
+
+所有命令都需要：
 
 ```bash
 uv venv --python 3.11
@@ -43,7 +57,7 @@ uv pip install -e ".[dev]"
 
 ### JDK 21 和 Spark 3.5.9
 
-导入依赖 **JDK 21** 和 **Spark 3.5.9-bin-hadoop3**。本机已经有的话，**不必下载**，任选下面一种即可。Iceberg runtime jar 已在仓库里（`third_party/iceberg-spark-runtime-3.5_2.12-1.11.0.jar`），一般不用另配。
+只 `convert` 的话到这里就可以了。`load` 还需要 **JDK 21** 和 **Spark 3.5.9-bin-hadoop3**。本机已经有的话不必下载，任选下面一种即可。Iceberg runtime jar 已在仓库里（`third_party/iceberg-spark-runtime-3.5_2.12-1.11.0.jar`），一般不用另配。
 
 查找顺序（从高到低）：
 
@@ -60,22 +74,14 @@ export JAVA_HOME=/path/to/jdk21
 export SPARK_HOME=/path/to/spark-3.5.9-bin-hadoop3
 ```
 
-只对这一次 `load` 生效也可以：
-
-```bash
-python -m iceberg_vector_loader load \
-  --java-home /path/to/jdk21 \
-  --spark-home /path/to/spark-3.5.9-bin-hadoop3 \
-  --namespace bench --table sift1m \
-  --input /path/to/sift_base.fvecs
-```
-
 | 变量 | 可选 | 作用 |
 |---|---|---|
 | `JAVA_HOME` | 本机已有 JDK 21 时设 | JDK 根目录 |
 | `SPARK_HOME` | 本机已有 Spark 3.5.9 时设 | Spark 根目录 |
 | `ICEBERG_SPARK_JAR` | 一般不用 | 覆盖仓库内 Iceberg jar |
 | `ICEBERG_VECTOR_TOOLS_DIR` | 一般不用 | `prepare.sh` 的下载目录，默认 `<仓库>/.tools` |
+
+单次覆盖、不改环境也可以，见 [`load`](#load)。
 
 #### 方式 B：拷到或链到 `.tools/`
 
@@ -95,33 +101,45 @@ ln -s /path/to/spark-3.5.9-bin-hadoop3 .tools/spark-3.5.9-bin-hadoop3
 
 ```bash
 ./scripts/prepare.sh
+# 等价：python -m iceberg_vector_loader bootstrap
 ```
 
-会把 Temurin JDK 21 和 Spark 3.5.9-bin-hadoop3 下到 `.tools/`（已存在则跳过）。若已设置可用的 `JAVA_HOME` / `SPARK_HOME`，对应那一项也不会再下。等价命令：`python -m iceberg_vector_loader bootstrap`。
+会把 Temurin JDK 21 和 Spark 3.5.9-bin-hadoop3 下到 `.tools/`（已存在则跳过）。若已设置可用的 `JAVA_HOME` / `SPARK_HOME`，对应那一项也不会再下。
 
-## 导入
+## convert
+
+只把 TexMex `.fvecs` 转成 parquet，**不建表、不启动 Spark**。写出两列：`id`（`int64`，默认 `0 .. n-1`）和 `embedding`（`list<float32>`）。
 
 ```bash
-python -m iceberg_vector_loader load \
-  --namespace bench \
-  --table sift1m \
-  --input /data/sift/sift_base.fvecs \
-  --warehouse ./warehouse
+python -m iceberg_vector_loader convert \
+  --input /path/to/sift_base.fvecs \
+  --output /path/to/sift_base.parquet
 ```
 
-`--input` 可以是：
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--input` | 必填 | TexMex `.fvecs`：每条 `int32 dim + dim * float32` |
+| `--output` | 必填 | 目标 parquet 路径 |
+| `--id-offset` | `0` | 起始 id，写成 `id_offset .. id_offset+n-1` |
+| `--batch-size` | `250000` | 每批行数，用来限制转换时的内存 |
+
+`load` 遇到 `.fvecs` 时走同一套转换。已经转好的 parquet 可以直接给 `load --input`。
+
+## load
+
+准备输入并写入 Iceberg v3 表。`--input` 可以是：
 
 | 类型 | 说明 |
 |---|---|
-| `.fvecs` | TexMex 格式：每条 `int32 dim + dim * float32`。先转成 parquet，再导入 |
+| `.fvecs` | 先转成 parquet，再导入 |
 | `.parquet` / `.parq` | 直接读 footer 推断列 |
 | 目录 | 当作一组 parquet 文件（Spark `parquet.\`dir\``） |
 
-成功后会打印表标识、`format-version`、location、维度、写入行数等。
+成功后打印表标识、`format-version`、location、维度、写入行数等。
 
-### 常用例子
+### 例子
 
-SIFT1M：
+SIFT1M（fvecs，内部会先转 parquet）：
 
 ```bash
 python -m iceberg_vector_loader load \
@@ -147,20 +165,22 @@ python -m iceberg_vector_loader load \
 ```bash
 python -m iceberg_vector_loader load \
   --namespace bench --table sift1m \
-  --input /data/sift_base.fvecs \
+  --input /path/to/sift_base.fvecs \
   --warehouse ./warehouse \
   --overwrite
 ```
 
-只转 fvecs、不建表：
+指定本机 JDK / Spark，不改环境变量：
 
 ```bash
-python -m iceberg_vector_loader convert \
-  --input sift_base.fvecs \
-  --output sift_base.parquet
+python -m iceberg_vector_loader load \
+  --java-home /path/to/jdk21 \
+  --spark-home /path/to/spark-3.5.9-bin-hadoop3 \
+  --namespace bench --table sift1m \
+  --input /path/to/sift_base.fvecs
 ```
 
-### `load` 参数
+### 参数
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
@@ -168,20 +188,23 @@ python -m iceberg_vector_loader convert \
 | `--table` | 必填 | 表名，不能含 `.` |
 | `--input` | 必填 | `.fvecs` / `.parquet` / parquet 目录 |
 | `--warehouse` | `warehouse` | 本地 Hadoop catalog 根目录 |
-| `--path-style` | `path` | `path`：metadata 里写绝对路径，不带 `file://`；`uri`：写成 `file:///...` |
+| `--output` | 见下文 | fvecs 转换或规范化后的 parquet 落盘路径 |
 | `--overwrite` | 关 | 先 `DROP TABLE ... PURGE` 再建表。不加此参数时，表已存在则直接报错退出 |
+| `--path-style` | `path` | `path`：metadata 里写绝对路径，不带 `file://`；`uri`：写成 `file:///...` |
 | `--id-column` | 自动推断 | parquet 里的整数 id 列 |
 | `--embedding-column` | 自动推断 | parquet 里的 `list<float>` 向量列 |
 | `--id-offset` | `0` | 仅用于 fvecs 转 parquet 时的起始 id；parquet 缺 id 会直接报错 |
 | `--batch-size` | `250000` | fvecs 转换 / 规范化时每批行数 |
-| `--parquet-output` | 见下文 | fvecs 转换或规范化后的 parquet 落盘路径 |
 | `--java-home` | `JAVA_HOME` 或 `.tools/jdk21` | JDK 21 |
 | `--spark-home` | `SPARK_HOME` 或 `.tools/spark-3.5.9-bin-hadoop3` | Spark 3.5.9 |
 | `--iceberg-jar` | `ICEBERG_SPARK_JAR` 或 `third_party/...jar` | Iceberg runtime |
-| `--driver-memory` | `4g` | `spark-sql` driver 堆内存。当前是 `local[*]`，导入主要吃这块，见下方估算 |
+| `--driver-memory` | `4g` | `spark-sql` driver 堆内存。当前是 `local[*]`，导入主要吃这块 |
 | `--compression-codec` | `zstd` | Parquet 压缩：`zstd` / `snappy` / `gzip` / `lz4` / `brotli` / `uncompressed` |
 
-fvecs 默认写到与源文件同目录的 `<stem>.parquet`。parquet 需要改列名或补 id 时，默认写到 warehouse 下 `_staging/<namespace>/<table>/prepared.parquet`。
+`--output` 默认：
+
+- `.fvecs`：源文件同目录的 `<stem>.parquet`
+- parquet 需要改列名时：warehouse 下 `_staging/<namespace>/<table>/prepared.parquet`
 
 ### `--driver-memory` 怎么估
 
@@ -210,7 +233,7 @@ fvecs 默认写到与源文件同目录的 `<stem>.parquet`。parquet 需要改�
 
 OOM 时先加大 `--driver-memory`，不要先改 `--batch-size`（后者只影响 Python 准备输入，几乎不影响 Spark driver）。
 
-## 表结构
+### 表结构
 
 固定两列，其余 parquet 列原样带上：
 
@@ -251,13 +274,13 @@ spark.sql.catalog.iceberg.warehouse=/绝对路径/warehouse
 SELECT id, embedding FROM iceberg.bench.sift1m LIMIT 5;
 ```
 
-## 列名怎么推断
+### 列名怎么推断
 
 Parquet footer 里能读到 schema，一般不用手写列名。
 
 **embedding 列**
 
-1. `--embedding-column` 指定则用指定列（必须是 `list`/`large_list`/`fixed_size_list` of float）
+1. `--embedding-column` 指定则用指定列（必须是 `list` / `large_list` / `fixed_size_list` of float）
 2. 否则在 float 数组列里找名为 `embedding` / `vector` / `features` / `emb` 的
 3. 只有一列 float 数组就用它
 4. 多列且名字对不上：报错，要求 `--embedding-column`
@@ -274,7 +297,7 @@ Parquet footer 里能读到 schema，一般不用手写列名。
 
 embedding 会规范成 `list<float32>`。维度必须整列一致，否则报错。
 
-## 路径风格
+### 路径风格
 
 Iceberg metadata 里的 `location`：
 
@@ -283,22 +306,10 @@ Iceberg metadata 里的 `location`：
 
 相对路径会先按当前工作目录展开成绝对路径再写入。
 
-## 命令一览
-
-```bash
-# 本机已有 JDK 21 / Spark 3.5.9：export JAVA_HOME / SPARK_HOME，或链到 .tools/
-./scripts/prepare.sh                          # 本机没有时再下载
-python -m iceberg_vector_loader bootstrap     # 同上
-python -m iceberg_vector_loader load ...      # 准备输入并写入 Iceberg v3
-python -m iceberg_vector_loader convert ...   # 只把 fvecs 转成 parquet
-```
-
-也可用入口：`iceberg-vector-loader load ...`。
-
 ## 测试
 
 ```bash
-# 本机已有则 export JAVA_HOME / SPARK_HOME，或链到 .tools/；没有再跑 prepare.sh
+# load 集成测试需要 JDK + Spark：本机已有则 export，或链到 .tools/；没有再跑 prepare.sh
 uv pip install -e ".[dev]"
 pytest
 ```
@@ -307,8 +318,9 @@ pytest
 
 ## 故障排查
 
-- **找不到 JDK / Spark / jar**：先确认已 `export JAVA_HOME` / `SPARK_HOME`，或 `.tools/jdk21/bin/java`、`.tools/spark-3.5.9-bin-hadoop3/bin/spark-sql` 存在。本机没有再跑 `./scripts/prepare.sh`。Iceberg jar 应在 `third_party/iceberg-spark-runtime-3.5_2.12-1.11.0.jar`。
+- **找不到 JDK / Spark / jar**：只影响 `load`。先确认已 `export JAVA_HOME` / `SPARK_HOME`，或 `.tools/jdk21/bin/java`、`.tools/spark-3.5.9-bin-hadoop3/bin/spark-sql` 存在。本机没有再跑 `./scripts/prepare.sh`。Iceberg jar 应在 `third_party/iceberg-spark-runtime-3.5_2.12-1.11.0.jar`。
 - **spark-sql 失败**：看 warehouse 下 `_staging/<namespace>/<table>/spark/spark-sql.log`。
-- **OOM**：按上一节加 `--driver-memory`。SIFT1M 用默认 `4g` 即可，SIFT10M 建议 `16g`。
+- **OOM**：加大 `--driver-memory`。SIFT1M 用默认 `4g` 即可，SIFT10M 建议 `16g`。
 - **多列 array&lt;float&gt; 报错**：加上 `--embedding-column`。
 - **表已存在**：默认报错退出。确认要换数据时加 `--overwrite`。
+- **parquet 缺 id**：直接报错。先用 `convert` 从 fvecs 生成带 id 的 parquet，或自己补一列整数 id。

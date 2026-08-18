@@ -39,7 +39,7 @@ def bootstrap_cmd() -> None:
 @click.option("--embedding-column", default=None, help="Parquet list<float> embedding column. Inferred when omitted.")
 @click.option("--id-offset", type=int, default=0, show_default=True, help="Starting id when converting fvecs (parquet must already have an id column).")
 @click.option("--batch-size", type=int, default=DEFAULT_BATCH_SIZE, show_default=True, help="Rows per fvecs/normalize batch.")
-@click.option("--parquet-output", default=None, type=click.Path(), help="Where to write converted/normalized parquet.")
+@click.option("--output", "parquet_output", default=None, type=click.Path(), help="Where to write converted/normalized parquet.")
 @click.option("--java-home", default=None, type=click.Path(), help="JDK 21 home. Defaults to JAVA_HOME or .tools/jdk21.")
 @click.option("--spark-home", default=None, type=click.Path(), help="Spark 3.5.9 home. Defaults to SPARK_HOME or .tools/spark-3.5.9-bin-hadoop3.")
 @click.option("--iceberg-jar", default=None, type=click.Path(), help="iceberg-spark-runtime-3.5_2.12-1.11.0.jar")
