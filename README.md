@@ -136,7 +136,7 @@ python -m iceberg_vector_loader convert \
 | 目录 | 目录内全部 parquet 当作一份输入（Spark `parquet.\`dir\``）；**所有文件 schema 必须一致** |
 | glob | 只读匹配的 parquet，例如 `shuffle_train-*-of-10.parquet`。shell 下必须给 pattern 加引号，见 [分片 parquet / glob](#分片-parquet--glob) |
 
-成功后打印表标识、`format-version`、location、维度、写入行数等。
+成功后打印表标识、`format-version`、location、维度、写入行数，以及墙钟耗时（总计 / prepare / spark）。
 
 ### 例子
 

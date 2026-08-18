@@ -4,7 +4,7 @@ import click
 
 from iceberg_vector_loader.bootstrap import bootstrap_tools
 from iceberg_vector_loader.fvecs import convert_fvecs_to_parquet
-from iceberg_vector_loader.loader import DEFAULT_DRIVER_MEMORY, DEFAULT_WAREHOUSE, load_vectors
+from iceberg_vector_loader.loader import DEFAULT_DRIVER_MEMORY, DEFAULT_WAREHOUSE, format_elapsed, load_vectors
 from iceberg_vector_loader.paths import PathStyle
 from iceberg_vector_loader.prepare import DEFAULT_BATCH_SIZE
 from iceberg_vector_loader.spark_sql import COMPRESSION_CODECS, DEFAULT_COMPRESSION_CODEC
@@ -115,6 +115,9 @@ def load_cmd(
                 f"warehouse       {result.warehouse}",
                 f"source parquet  {result.parquet_source}",
                 f"compression     {result.compression_codec}",
+                f"elapsed         {format_elapsed(result.elapsed_seconds)} "
+                f"(prepare {format_elapsed(result.prepare_seconds)}, "
+                f"spark {format_elapsed(result.spark_seconds)})",
             ]
         )
     )

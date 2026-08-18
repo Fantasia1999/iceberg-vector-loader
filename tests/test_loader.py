@@ -6,7 +6,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from iceberg_vector_loader.inspect import load_metadata, snapshot_total_records
-from iceberg_vector_loader.loader import load_vectors, read_table_parquet
+from iceberg_vector_loader.loader import format_elapsed, load_vectors, read_table_parquet
 from iceberg_vector_loader.paths import PathStyle, has_file_scheme
 from iceberg_vector_loader.spark_env import runtime_available
 from iceberg_vector_loader.schema import infer_column_mapping
@@ -86,6 +86,13 @@ def test_build_select_exprs_aliases_emb() -> None:
     )
     assert "SELECT id, emb AS embedding" in sql
     assert "FROM parquet.`/data/shuffle_train-*-of-10.parquet`" in sql
+
+
+def test_format_elapsed() -> None:
+    assert format_elapsed(0.04) == "0.0s"
+    assert format_elapsed(12.34) == "12.3s"
+    assert format_elapsed(87) == "1m 27s"
+    assert format_elapsed(3723) == "1h 2m 3s"
 
 
 def test_compression_codec_rejects_unknown() -> None:
@@ -266,3 +273,6 @@ def test_cli_load(tmp_path: Path) -> None:
     )
     assert result.exit_code == 0, result.output
     assert "format-version  3" in result.output
+    assert "elapsed         " in result.output
+    assert "prepare " in result.output
+    assert "spark " in result.output

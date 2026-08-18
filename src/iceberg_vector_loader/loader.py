@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 
 import pyarrow.parquet as pq
 
@@ -31,6 +32,17 @@ DEFAULT_WAREHOUSE = "warehouse"
 DEFAULT_DRIVER_MEMORY = "4g"
 
 
+def format_elapsed(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    total = int(round(seconds))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h {minutes}m {secs}s"
+    return f"{minutes}m {secs}s"
+
+
 @dataclass(frozen=True)
 class LoadResult:
     namespace: str
@@ -45,6 +57,9 @@ class LoadResult:
     overwritten: bool
     parquet_source: str
     compression_codec: str
+    elapsed_seconds: float
+    prepare_seconds: float
+    spark_seconds: float
 
 
 def load_vectors(
@@ -70,6 +85,7 @@ def load_vectors(
     if "." in table:
         raise ValueError(f"table name must not contain '.': {table}")
     codec = normalize_compression_codec(compression_codec)
+    started = perf_counter()
 
     warehouse_dir = resolve_local_path(warehouse)
     warehouse_dir.mkdir(parents=True, exist_ok=True)
@@ -84,6 +100,7 @@ def load_vectors(
         )
 
     staging = warehouse_dir / "_staging" / namespace / table
+    prepare_started = perf_counter()
     prepared = prepare_input(
         input_path,
         parquet_output=parquet_output,
@@ -93,6 +110,7 @@ def load_vectors(
         id_offset=id_offset,
         batch_size=batch_size,
     )
+    prepare_seconds = perf_counter() - prepare_started
 
     runtime = resolve_runtime(java_home=java_home, spark_home=spark_home, iceberg_jar=iceberg_jar)
     sql = build_load_sql(
@@ -107,6 +125,7 @@ def load_vectors(
         select_exprs=build_select_exprs(prepared.mapping),
     )
     work_dir = staging / "spark"
+    spark_started = perf_counter()
     run_spark_sql(
         runtime,
         sql=sql,
@@ -114,6 +133,7 @@ def load_vectors(
         work_dir=work_dir,
         driver_memory=driver_memory,
     )
+    spark_seconds = perf_counter() - spark_started
 
     metadata_path = latest_metadata_path(warehouse_dir, namespace, table)
     rewrite_metadata_locations(metadata_path, style)
@@ -139,6 +159,9 @@ def load_vectors(
         overwritten=existed and overwrite,
         parquet_source=str(prepared.path),
         compression_codec=codec,
+        elapsed_seconds=perf_counter() - started,
+        prepare_seconds=prepare_seconds,
+        spark_seconds=spark_seconds,
     )
 
 
