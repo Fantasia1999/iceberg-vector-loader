@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 
 from iceberg_vector_loader.paths import PathStyle, format_location
+from iceberg_vector_loader.schema import EMBEDDING_FIELD, ID_FIELD, ColumnMapping
 from iceberg_vector_loader.spark_env import CATALOG_NAME, SparkRuntime
 from iceberg_vector_loader.spark_types import quote_ident
 
@@ -48,6 +49,19 @@ def spark_conf(warehouse: str, iceberg_jar: Path) -> list[str]:
     ]
 
 
+def build_select_exprs(mapping: ColumnMapping) -> list[str]:
+    def aliased(source: str, dest: str) -> str:
+        if source == dest:
+            return quote_ident(source)
+        return f"{quote_ident(source)} AS {quote_ident(dest)}"
+
+    return [
+        aliased(mapping.id_column, ID_FIELD),
+        aliased(mapping.embedding_column, EMBEDDING_FIELD),
+        *[quote_ident(name) for name in mapping.extra_columns],
+    ]
+
+
 def build_load_sql(
     namespace: str,
     table: str,
@@ -57,10 +71,12 @@ def build_load_sql(
     dimension: int,
     select_columns: list[str],
     compression_codec: str = DEFAULT_COMPRESSION_CODEC,
+    select_exprs: list[str] | None = None,
 ) -> str:
     ident = table_ident(namespace, table)
     parquet_uri = str(parquet_path)
     cols = ", ".join(quote_ident(name) for name in select_columns)
+    selected = ", ".join(select_exprs) if select_exprs is not None else cols
     codec = normalize_compression_codec(compression_codec)
     props = ",\n  ".join(
         [
@@ -79,7 +95,7 @@ def build_load_sql(
         f"CREATE TABLE IF NOT EXISTS {ident} (\n  {schema_ddl}\n) USING iceberg\nTBLPROPERTIES (\n  {props}\n);"
     )
     statements.append(
-        f"INSERT INTO {ident} ({cols})\nSELECT {cols}\nFROM parquet.`{parquet_uri}`;"
+        f"INSERT INTO {ident} ({cols})\nSELECT {selected}\nFROM parquet.`{parquet_uri}`;"
     )
     return "\n".join(statements) + "\n"
 

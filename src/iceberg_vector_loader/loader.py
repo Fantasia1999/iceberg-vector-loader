@@ -20,6 +20,7 @@ from iceberg_vector_loader.spark_env import resolve_runtime
 from iceberg_vector_loader.spark_sql import (
     DEFAULT_COMPRESSION_CODEC,
     build_load_sql,
+    build_select_exprs,
     normalize_compression_codec,
     run_spark_sql,
     warehouse_location,
@@ -83,7 +84,7 @@ def load_vectors(
         )
 
     staging = warehouse_dir / "_staging" / namespace / table
-    source, dimension, schema = prepare_input(
+    prepared = prepare_input(
         input_path,
         parquet_output=parquet_output,
         staging_dir=staging,
@@ -97,12 +98,13 @@ def load_vectors(
     sql = build_load_sql(
         namespace=namespace,
         table=table,
-        parquet_path=source,
-        schema_ddl=column_ddl(schema),
+        parquet_path=prepared.path,
+        schema_ddl=column_ddl(prepared.schema),
         overwrite=overwrite,
-        dimension=dimension,
-        select_columns=list(schema.names),
+        dimension=prepared.dimension,
+        select_columns=list(prepared.schema.names),
         compression_codec=codec,
+        select_exprs=build_select_exprs(prepared.mapping),
     )
     work_dir = staging / "spark"
     run_spark_sql(
@@ -133,9 +135,9 @@ def load_vectors(
         format_version=format_version,
         rows_written=snapshot_total_records(metadata),
         files_written=files_after,
-        dimension=dimension,
+        dimension=prepared.dimension,
         overwritten=existed and overwrite,
-        parquet_source=str(source),
+        parquet_source=str(prepared.path),
         compression_codec=codec,
     )
 

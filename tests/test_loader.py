@@ -9,7 +9,8 @@ from iceberg_vector_loader.inspect import load_metadata, snapshot_total_records
 from iceberg_vector_loader.loader import load_vectors, read_table_parquet
 from iceberg_vector_loader.paths import PathStyle, has_file_scheme
 from iceberg_vector_loader.spark_env import runtime_available
-from iceberg_vector_loader.spark_sql import build_load_sql, normalize_compression_codec
+from iceberg_vector_loader.schema import infer_column_mapping
+from iceberg_vector_loader.spark_sql import build_load_sql, build_select_exprs, normalize_compression_codec
 from iceberg_vector_loader.spark_types import column_ddl, spark_type
 
 spark_only = pytest.mark.skipif(not runtime_available(), reason="Spark 3.5.9 / JDK 21 / Iceberg 1.11.0 jar not available")
@@ -62,6 +63,29 @@ def test_build_load_sql_is_v3() -> None:
         compression_codec="SNAPPY",
     )
     assert "write.parquet.compression-codec'='snappy'" in snappy
+
+
+def test_build_select_exprs_aliases_emb() -> None:
+    schema = pa.schema(
+        [
+            pa.field("id", pa.int64()),
+            pa.field("emb", pa.list_(pa.float32())),
+        ]
+    )
+    exprs = build_select_exprs(infer_column_mapping(schema))
+    assert exprs == ["id", "emb AS embedding"]
+    sql = build_load_sql(
+        namespace="bench",
+        table="bio",
+        parquet_path=Path("/data/shuffle_train-*-of-10.parquet"),
+        schema_ddl=column_ddl(schema),
+        overwrite=False,
+        dimension=1024,
+        select_columns=["id", "embedding"],
+        select_exprs=exprs,
+    )
+    assert "SELECT id, emb AS embedding" in sql
+    assert "FROM parquet.`/data/shuffle_train-*-of-10.parquet`" in sql
 
 
 def test_compression_codec_rejects_unknown() -> None:
@@ -148,6 +172,38 @@ def test_load_parquet_directory(tmp_path: Path) -> None:
     assert result.rows_written == 3
     ids = read_table_parquet(tmp_path / "wh", "dir", "parts")["id"].to_pylist()
     assert sorted(ids) == [0, 1, 2]
+
+
+@spark_only
+def test_load_parquet_glob_skips_other_schemas(tmp_path: Path) -> None:
+    directory = tmp_path / "bioasq"
+    directory.mkdir()
+    for index, rows in enumerate(([0], [1, 2])):
+        pq.write_table(
+            pa.table(
+                {
+                    "id": pa.array(rows, type=pa.int64()),
+                    "emb": pa.array([[float(i), 1.0] for i in rows], type=pa.list_(pa.float32())),
+                }
+            ),
+            directory / f"shuffle_train-{index:02d}-of-02.parquet",
+        )
+    pq.write_table(
+        pa.table({"id": pa.array([99], type=pa.int64()), "labels": pa.array(["skip"])}),
+        directory / "scalar_labels.parquet",
+    )
+    result = load_vectors(
+        namespace="bio",
+        table="train",
+        input_path=str(directory / "shuffle_train-*-of-02.parquet"),
+        warehouse=tmp_path / "wh",
+    )
+    assert result.rows_written == 3
+    assert result.dimension == 2
+    assert result.parquet_source.endswith("shuffle_train-*-of-02.parquet")
+    loaded = read_table_parquet(tmp_path / "wh", "bio", "train").sort_by("id")
+    assert loaded["id"].to_pylist() == [0, 1, 2]
+    assert loaded.column_names[1] == "embedding"
 
 
 @spark_only

@@ -22,7 +22,7 @@
 ## 架构
 
 ```
-.fvecs                          .parquet / parquet 目录
+.fvecs                          .parquet / 目录 / glob
    │                                    │
    ▼                                    │
 convert（可选，只出 parquet）            │
@@ -133,7 +133,8 @@ python -m iceberg_vector_loader convert \
 |---|---|
 | `.fvecs` | 先转成 parquet，再导入 |
 | `.parquet` / `.parq` | 直接读 footer 推断列 |
-| 目录 | 当作一组 parquet 文件（Spark `parquet.\`dir\``） |
+| 目录 | 目录内全部 parquet 当作一份输入（Spark `parquet.\`dir\``）；**所有文件 schema 必须一致** |
+| glob | 只读匹配的 parquet，例如 `shuffle_train-*-of-10.parquet`。shell 下必须给 pattern 加引号，见 [分片 parquet / glob](#分片-parquet--glob) |
 
 成功后打印表标识、`format-version`、location、维度、写入行数等。
 
@@ -159,6 +160,8 @@ python -m iceberg_vector_loader load \
   --warehouse ./warehouse \
   --driver-memory 16g
 ```
+
+分片 parquet（`shuffle_train-00-of-10.parquet` 这类）用 glob，见下一节。
 
 表已存在时默认拒绝；要重建：
 
@@ -186,7 +189,7 @@ python -m iceberg_vector_loader load \
 |---|---|---|
 | `--namespace` | 必填 | Iceberg namespace |
 | `--table` | 必填 | 表名，不能含 `.` |
-| `--input` | 必填 | `.fvecs` / `.parquet` / parquet 目录 |
+| `--input` | 必填 | `.fvecs` / `.parquet` / parquet 目录 / parquet glob（glob 必须加引号） |
 | `--warehouse` | `warehouse` | 本地 Hadoop catalog 根目录 |
 | `--output` | 见下文 | fvecs 转换或规范化后的 parquet 落盘路径 |
 | `--overwrite` | 关 | 先 `DROP TABLE ... PURGE` 再建表。不加此参数时，表已存在则直接报错退出 |
@@ -204,7 +207,36 @@ python -m iceberg_vector_loader load \
 `--output` 默认：
 
 - `.fvecs`：源文件同目录的 `<stem>.parquet`
-- parquet 需要改列名时：warehouse 下 `_staging/<namespace>/<table>/prepared.parquet`
+- parquet 需要落一份规范化副本时（仅当显式传了 `--output`）：你指定的路径
+- 只是列名不同（如 `emb` → `embedding`）：不再重写，Spark `SELECT ... AS` 改名
+
+### 分片 parquet / glob
+
+数据集一大就会拆成多个 parquet，常见名字是 HuggingFace 风格的 `*-NN-of-MM.parquet`。`--input` 接受 glob，只读匹配到的文件。
+
+```bash
+python -m iceberg_vector_loader load \
+  --namespace bioasq \
+  --table train \
+  --input '/data/bioasq_large_10m/shuffle_train-*-of-10.parquet' \
+  --warehouse ./warehouse \
+  --driver-memory 64g
+```
+
+| 写法 | 结果 |
+|---|---|
+| `'.../shuffle_train-*-of-10.parquet'` | 10 个 train shard 全部导入 |
+| `.../shuffle_train-00-of-10.parquet` | 只导入这一个文件；若同目录还有其它 `*-of-10` shard，会打警告 |
+| `.../bioasq_large_10m/` | 目录里全部 `.parquet`。train / test / neighbors / labels 混在一起且 schema 不同时会报错 |
+
+规则：
+
+- **shell 下必须给 glob 加引号**（单引号或双引号）。否则 `*` 会被 shell 展开，`--input` 只拿到第一份文件，后面的路径变成多余参数。
+- 匹配到的文件必须是 `.parquet` / `.parq`，且 **schema 完全一致**（列名和类型）。不一致时按 schema 分组列出文件名，然后退出。
+- 支持 `*`、`?`、`[…]`，以及需要跨目录时的 `**`。只匹配一层文件名时用 `*` 即可，例如 `shuffle_train-*-of-10.parquet`。
+- 同目录里常混着 `test.parquet`、`neighbors.parquet`、`scalar_labels.parquet`。要哪一份就写哪一份的 pattern，不要图省事传整个目录。
+- 测试集另导一张表：`--input /data/bioasq_large_10m/test.parquet`。
+- 列名是 `emb` / `vector` 这类别名时，Spark `SELECT ... AS embedding` 改名，**不会**先把十几 GB 重写成一份新 parquet。只有显式传了 `--output` 才会落规范化副本。
 
 ### `--driver-memory` 怎么估
 
@@ -324,3 +356,5 @@ pytest
 - **多列 array&lt;float&gt; 报错**：加上 `--embedding-column`。
 - **表已存在**：默认报错退出。确认要换数据时加 `--overwrite`。
 - **parquet 缺 id**：直接报错。先用 `convert` 从 fvecs 生成带 id 的 parquet，或自己补一列整数 id。
+- **目录里混了多种 parquet**：会按 schema 分组报错。用 glob 只选一个 split，例如 `'.../shuffle_train-*-of-10.parquet'`。
+- **只导进了一个 shard**：确认 `--input` 是 glob 而不是单个 `00-of-10` 文件；shell 下 glob 必须加引号。

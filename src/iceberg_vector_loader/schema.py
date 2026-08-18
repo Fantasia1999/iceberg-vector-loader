@@ -110,6 +110,22 @@ def infer_column_mapping(
     )
 
 
+def remapped_schema(schema: pa.Schema, mapping: ColumnMapping) -> pa.Schema:
+    """Same types as the source, with id/embedding renamed to the table names."""
+    fields = [
+        schema.field(mapping.id_column).with_name(ID_FIELD),
+        schema.field(mapping.embedding_column).with_name(EMBEDDING_FIELD),
+    ]
+    for name in mapping.extra_columns:
+        fields.append(schema.field(name))
+    return pa.schema(fields)
+
+
+def identity_mapping(schema: pa.Schema) -> ColumnMapping:
+    extras = tuple(name for name in schema.names if name not in {ID_FIELD, EMBEDDING_FIELD})
+    return ColumnMapping(id_column=ID_FIELD, embedding_column=EMBEDDING_FIELD, extra_columns=extras)
+
+
 def _cast_embedding(column: pa.Array) -> pa.Array:
     target = pa.list_(pa.float32())
     if pa.types.is_fixed_size_list(column.type) or pa.types.is_large_list(column.type):

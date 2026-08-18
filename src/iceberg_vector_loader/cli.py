@@ -25,7 +25,12 @@ def bootstrap_cmd() -> None:
 @main.command("load")
 @click.option("--namespace", required=True, help="Iceberg namespace.")
 @click.option("--table", "table_name", required=True, help="Iceberg table name.")
-@click.option("--input", "input_path", required=True, type=click.Path(exists=True), help="fvecs file, parquet file, or parquet directory.")
+@click.option(
+    "--input",
+    "input_path",
+    required=True,
+    help="fvecs file, parquet file, parquet directory, or a glob of parquet files (quote the pattern).",
+)
 @click.option("--warehouse", default=DEFAULT_WAREHOUSE, show_default=True, help="Local Hadoop warehouse directory.")
 @click.option(
     "--path-style",
@@ -94,6 +99,8 @@ def load_cmd(
             compression_codec=compression_codec,
         )
     except FileExistsError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except (FileNotFoundError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(
         "\n".join(
