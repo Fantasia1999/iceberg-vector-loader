@@ -10,6 +10,7 @@ from iceberg_vector_loader.lance_io import (
     LanceUnavailableError,
     convert_to_lance,
     format_arrow_table,
+    format_query_vector,
     parse_columns,
     parse_query_vector,
     query_lance,
@@ -243,6 +244,7 @@ def to_lance_cmd(
 @click.option("--nprobes", type=int, default=None, help="IVF partitions to probe (indexed search).")
 @click.option("--refine-factor", type=int, default=None, help="Re-rank this many extra ANN candidates.")
 @click.option("--no-index", is_flag=True, help="Ignore an existing vector index and brute-force scan.")
+@click.option("--verbose", is_flag=True, help="Print the full query vector instead of a truncated preview.")
 def query_lance_cmd(
     dataset_path: str,
     query_id: int | None,
@@ -258,6 +260,7 @@ def query_lance_cmd(
     nprobes: int | None,
     refine_factor: int | None,
     no_index: bool,
+    verbose: bool,
 ) -> None:
     """Run KNN / SQL queries against a Lance dataset written by to-lance."""
     vector = None
@@ -296,6 +299,8 @@ def query_lance_cmd(
         header.append(f"k               {result.k}")
         if result.query_id is not None:
             header.append(f"query-id        {result.query_id}")
+        if result.query_vector is not None:
+            header.append(f"query-vector    {format_query_vector(result.query_vector, verbose=verbose)}")
     click.echo("\n".join(header))
     click.echo()
-    click.echo(format_arrow_table(result.table))
+    click.echo(format_arrow_table(result.table, max_list_items=None if verbose else 8))

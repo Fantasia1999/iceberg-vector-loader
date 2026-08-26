@@ -205,11 +205,18 @@ python -m iceberg_vector_loader query-lance \
   --dataset ./sift10m.lance \
   --k 10
 
-# 指定 id 的向量当 query
+# 指定 id 的向量当 query（默认只打印 query 向量前 8 维）
 python -m iceberg_vector_loader query-lance \
   --dataset ./sift10m.lance \
   --query-id 42 \
   --k 5
+
+# 打印完整 query 向量
+python -m iceberg_vector_loader query-lance \
+  --dataset ./sift10m.lance \
+  --query-id 42 \
+  --k 5 \
+  --verbose
 
 # 手写 query 向量（逗号分隔或 JSON list）
 python -m iceberg_vector_loader query-lance \
@@ -260,7 +267,7 @@ python -m iceberg_vector_loader query-lance \
 | 参数 | 默认 | 说明 |
 |---|---|---|
 | `--dataset` | 必填 | Lance dataset 目录 |
-| `--query-id` | 无 | 用该行 embedding 当 query |
+| `--query-id` | 无 | 用该行 embedding 当 query；结果头里会打印该向量 |
 | `--query-vector` | 无 | 逗号分隔或 JSON 数组 |
 | `--sample` | 关 | 随机抽一行当 query |
 | `--k` | `10` | 近邻个数 |
@@ -272,6 +279,7 @@ python -m iceberg_vector_loader query-lance \
 | `--nprobes` | Lance 默认 | IVF 探测的分区数 |
 | `--refine-factor` | 无 | ANN 多取 `k * refine_factor` 再按真实距离重排 |
 | `--no-index` | 关 | 忽略已有向量索引，精确扫描 |
+| `--verbose` | 关 | 完整打印 query 向量（以及结果里的 list 列）；默认只显示前 8 个元素 |
 
 默认不打印 embedding（太长）。距离列是 `_distance`：L2 时是平方欧氏距离。精确 KNN 下 query 自己命中约为 `0`；IVF_PQ 未 refine 时是近似距离。
 

@@ -189,6 +189,7 @@ class LanceConvertResult:
 class LanceQueryResult:
     table: pa.Table
     query_id: int | None
+    query_vector: tuple[float, ...] | None
     k: int | None
     sql: str | None
     elapsed_seconds: float
@@ -479,6 +480,7 @@ def query_lance(
         return LanceQueryResult(
             table=table,
             query_id=None,
+            query_vector=None,
             k=None,
             sql=sql,
             elapsed_seconds=perf_counter() - started,
@@ -524,27 +526,38 @@ def query_lance(
     return LanceQueryResult(
         table=table,
         query_id=chosen_id,
+        query_vector=tuple(float(x) for x in np.asarray(vector, dtype=np.float32).ravel()),
         k=k,
         sql=None,
         elapsed_seconds=perf_counter() - started,
     )
 
 
-def _format_cell(value, max_list_items: int = 8) -> str:
+QUERY_VECTOR_PREVIEW = 8
+
+
+def format_query_vector(values: tuple[float, ...] | list[float], *, verbose: bool = False, preview: int = QUERY_VECTOR_PREVIEW) -> str:
+    seq = list(values)
+    shown = _format_cell(seq, max_list_items=len(seq) if verbose else preview)
+    return f"{shown}  (dim {len(seq)})"
+
+
+def _format_cell(value, max_list_items: int | None = 8) -> str:
     if value is None:
         return ""
     if isinstance(value, float):
         return f"{value:.6g}"
     if isinstance(value, (list, tuple)):
-        if len(value) > max_list_items:
-            head = ", ".join(_format_cell(item, max_list_items) for item in value[:max_list_items])
+        limit = len(value) if max_list_items is None else max_list_items
+        if len(value) > limit:
+            head = ", ".join(_format_cell(item, max_list_items) for item in value[:limit])
             return f"[{head}, ...]"
         inner = ", ".join(_format_cell(item, max_list_items) for item in value)
         return f"[{inner}]"
     return str(value)
 
 
-def format_arrow_table(table: pa.Table, *, max_list_items: int = 8) -> str:
+def format_arrow_table(table: pa.Table, *, max_list_items: int | None = 8) -> str:
     if table.num_rows == 0:
         return "(0 rows)"
     names = list(table.column_names)

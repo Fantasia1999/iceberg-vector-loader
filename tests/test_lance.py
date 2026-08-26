@@ -7,7 +7,7 @@ import pytest
 
 lance = pytest.importorskip("lance")
 
-from iceberg_vector_loader.lance_io import convert_to_lance, parse_query_vector, query_lance
+from iceberg_vector_loader.lance_io import convert_to_lance, format_query_vector, parse_query_vector, query_lance
 from iceberg_vector_loader.schema import EMBEDDING_FIELD, NEIGHBORS_FIELD
 
 
@@ -85,6 +85,18 @@ def test_parse_query_vector() -> None:
     assert parse_query_vector("[1, 2, 3]") == [1.0, 2.0, 3.0]
 
 
+def test_format_query_vector_preview_and_verbose() -> None:
+    values = tuple(float(i) for i in range(12))
+    preview = format_query_vector(values)
+    assert "dim 12" in preview
+    assert "..." in preview
+    assert "11" not in preview.split("...")[0]
+    full = format_query_vector(values, verbose=True)
+    assert "..." not in full
+    assert full.endswith("(dim 12)")
+    assert "11" in full
+
+
 def test_self_search_first_row(tmp_path: Path) -> None:
     src = tmp_path / "vecs.parquet"
     dest = tmp_path / "vecs.lance"
@@ -103,6 +115,7 @@ def test_include_embedding_column(tmp_path: Path) -> None:
     knn = query_lance(dest, query_id=0, k=1, include_embedding=True)
     assert EMBEDDING_FIELD in knn.table.column_names
     np.testing.assert_allclose(knn.table[EMBEDDING_FIELD][0].as_py(), [0.0, 1.0])
+    assert knn.query_vector == (0.0, 1.0)
 
 
 def _write_fvecs(path: Path, vectors: np.ndarray) -> None:
