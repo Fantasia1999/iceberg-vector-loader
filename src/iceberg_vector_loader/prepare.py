@@ -10,7 +10,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from iceberg_vector_loader.fvecs import convert_fvecs_to_parquet
+from iceberg_vector_loader.fvecs import FVECS_SUFFIXES, IVECS_SUFFIXES, convert_fvecs_to_parquet
 from iceberg_vector_loader.paths import resolve_local_path
 from iceberg_vector_loader.schema import (
     EMBEDDING_FIELD,
@@ -22,7 +22,6 @@ from iceberg_vector_loader.schema import (
 )
 
 DEFAULT_BATCH_SIZE = 250_000
-FVECS_SUFFIXES = {".fvecs"}
 PARQUET_SUFFIXES = {".parquet", ".parq"}
 _GLOB_METACHARS = set("*?[]")
 _SHARD_NAME = re.compile(
@@ -41,6 +40,10 @@ class PreparedInput:
 
 def is_fvecs(path: Path) -> bool:
     return path.is_file() and path.suffix.lower() in FVECS_SUFFIXES
+
+
+def is_ivecs(path: Path) -> bool:
+    return path.is_file() and path.suffix.lower() in IVECS_SUFFIXES
 
 
 def is_parquet_file(path: Path) -> bool:

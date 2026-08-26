@@ -1,8 +1,9 @@
 # iceberg-vector-loader
 
-把本地向量数据导入 **Iceberg v3** 表。写入走 **Spark 原生**（`spark-sql` + Hadoop catalog），不是 pyiceberg。
-
-适用场景：SIFT1M / SIFT10M 以及其他本地 embedding 数据集。namespace、表名都可以指定。
+- 把本地向量数据导入 **Iceberg v3** 表。
+- 写入走 **Spark 原生**（`spark-sql` + Hadoop catalog），不是 pyiceberg。
+- 同一份 parquet / fvecs / ivecs 也可以转成 **Lance** dataset，方便本地做 KNN / ANN 查询。
+- 适用场景：SIFT1M / SIFT10M 以及其他本地 embedding 数据集。namespace、表名都可以指定。
 
 | 组件 | 版本 |
 |---|---|
@@ -15,33 +16,34 @@
 
 | 命令 | 作用 | 是否需要 JDK / Spark |
 |---|---|---|
-| `convert` | 只把 `.fvecs` 转成 parquet | 否 |
+| `convert` | 只把 `.fvecs` / `.ivecs` 转成 parquet | 否 |
+| `to-lance` | 把 parquet / fvecs / ivecs 转成 Lance dataset | 否 |
+| `query-lance` | 在 Lance dataset 上做 KNN / SQL 查询 | 否 |
 | `load` | 准备输入并写入 Iceberg v3 表 | 是 |
 | `bootstrap` | 解析 / 下载 JDK 21 和 Spark 3.5.9 | 下载时需要网络 |
 
 ## 架构
 
 ```
-.fvecs                          .parquet / 目录 / glob
+.fvecs / .ivecs                 .parquet / 目录 / glob
    │                                    │
    ▼                                    │
-convert（可选，只出 parquet）            │
+convert（parquet 中转）                 │
    │                                    │
-   └──────────────┬─────────────────────┘
-                  ▼
-            load：Python 准备输入
-            （fvecs 先转 parquet；parquet 必须已有 id）
-                  │
-                  ▼
-            spark-sql + Iceberg 1.11 Java runtime
-            CREATE NAMESPACE / CREATE TABLE (format-version=3) / INSERT
-                  │
-                  ▼
-            Hadoop catalog
-            <warehouse>/<namespace>/<table>/
+   ├──────────────┬─────────────────────┤
+                  │                     │
+                  ▼                     ▼
+            load：写入 Iceberg     to-lance：写出 Lance
+            spark-sql + v3         定长 list（embedding / neighbors）
+                  │                     │
+                  ▼                     ▼
+            Hadoop catalog         query-lance：KNN / SQL
+            <warehouse>/...        <name>.lance/
 ```
 
-Python 只做数据准备。建表由 Spark 的 Iceberg Java writer 完成，因此是满血 V3（含 `next-row-id` 等）。表已存在且未指定 `--overwrite` 时直接退出，不会 append。
+`load`：Python 只做数据准备，建表由 Spark 的 Iceberg Java writer 完成，因此是满血 V3（含 `next-row-id` 等）。表已存在且未指定 `--overwrite` 时直接退出，不会 append。
+
+`to-lance` / `query-lance`：全程 Python（`pylance`），不经过 Spark。
 
 ## 安装
 
@@ -57,7 +59,7 @@ uv pip install -e ".[dev]"
 
 ### JDK 21 和 Spark 3.5.9
 
-只 `convert` 的话到这里就可以了。`load` 还需要 **JDK 21** 和 **Spark 3.5.9-bin-hadoop3**。本机已经有的话不必下载，任选下面一种即可。Iceberg runtime jar 已在仓库里（`third_party/iceberg-spark-runtime-3.5_2.12-1.11.0.jar`），一般不用另配。
+只 `convert` / `to-lance` / `query-lance` 的话到这里就可以了。`load` 还需要 **JDK 21** 和 **Spark 3.5.9-bin-hadoop3**。本机已经有的话不必下载，任选下面一种即可。Iceberg runtime jar 已在仓库里（`third_party/iceberg-spark-runtime-3.5_2.12-1.11.0.jar`），一般不用另配。
 
 查找顺序（从高到低）：
 
@@ -108,22 +110,204 @@ ln -s /path/to/spark-3.5.9-bin-hadoop3 .tools/spark-3.5.9-bin-hadoop3
 
 ## convert
 
-只把 TexMex `.fvecs` 转成 parquet，**不建表、不启动 Spark**。写出两列：`id`（`int64`，默认 `0 .. n-1`）和 `embedding`（`list<float32>`）。
+只把 TexMex `.fvecs` / `.ivecs` 转成 parquet，**不建表、不启动 Spark**。
+
+| 输入 | 写出列 |
+|---|---|
+| `.fvecs` | `id`（`int64`，默认 `0 .. n-1`）+ `embedding`（`list<float32>`） |
+| `.ivecs` | `id` + `neighbors`（`list<int32>`，通常是 ground-truth 近邻 id） |
 
 ```bash
 python -m iceberg_vector_loader convert \
   --input /path/to/sift_base.fvecs \
   --output /path/to/sift_base.parquet
+
+python -m iceberg_vector_loader convert \
+  --input /path/to/sift_groundtruth.ivecs \
+  --output /path/to/sift_groundtruth.parquet
 ```
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `--input` | 必填 | TexMex `.fvecs`：每条 `int32 dim + dim * float32` |
+| `--input` | 必填 | TexMex `.fvecs`（`int32 dim + dim * float32`）或 `.ivecs`（`int32 dim + dim * int32`） |
 | `--output` | 必填 | 目标 parquet 路径 |
 | `--id-offset` | `0` | 起始 id，写成 `id_offset .. id_offset+n-1` |
 | `--batch-size` | `250000` | 每批行数，用来限制转换时的内存 |
 
-`load` 遇到 `.fvecs` 时走同一套转换。已经转好的 parquet 可以直接给 `load --input`。
+`load` 遇到 `.fvecs` 时走同一套转换。`.ivecs` 只给 `convert` / `to-lance`（近邻 id，不是向量），不要拿去 `load`。已经转好的向量 parquet 可以直接给 `load --input` 或 `to-lance --input`。
+
+## to-lance
+
+把 parquet / fvecs / ivecs 转成 Lance dataset，**不启动 Spark**。`.fvecs` / `.ivecs` 先走 `convert`，把 parquet 写到 Lance 输出旁边（`--output ./sift.lance` → `./sift.parquet`），再读这份 parquet 写出 Lance。
+
+- 浮点 embedding（fvecs / 普通向量 parquet）：写成 `fixed_size_list<float32>[dim]`，可 `--index` 后做 KNN / ANN。
+- 整数 neighbors（ivecs / ground-truth parquet）：写成 `fixed_size_list<int32>[k]`，不能建向量索引，用 `query-lance --sql` 查看。
+
+列名推断规则和 `load` 相同：`id` + `embedding`；ivecs 则是 `id` + `neighbors`。其余列原样带上。
+
+```bash
+python -m iceberg_vector_loader to-lance \
+  --input /data/sift10m.parquet \
+  --output ./sift10m.lance
+
+# fvecs / ivecs：先在 Lance 输出旁写出 .parquet，再转 Lance
+python -m iceberg_vector_loader to-lance \
+  --input /path/to/sift_base.fvecs \
+  --output ./sift_base.lance \
+  --index
+
+python -m iceberg_vector_loader to-lance \
+  --input /path/to/sift_groundtruth.ivecs \
+  --output ./sift_gt.lance
+```
+
+分片 parquet：
+
+```bash
+python -m iceberg_vector_loader to-lance \
+  --input '/data/bioasq_large_10m/shuffle_train-*-of-10.parquet' \
+  --output ./bioasq_train.lance
+```
+
+大规模数据建议顺带建 IVF_PQ 索引，后面 `query-lance` 才是 ANN 而不是全表扫描：
+
+```bash
+python -m iceberg_vector_loader to-lance \
+  --input /data/sift1m.parquet \
+  --output ./sift1m.lance \
+  --index \
+  --metric L2
+```
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--input` | 必填 | `.fvecs` / `.ivecs` / `.parquet` / parquet 目录 / parquet glob（glob 必须加引号） |
+| `--output` | 必填 | Lance dataset 目录，通常以 `.lance` 结尾 |
+| `--overwrite` | 关 | 目标已存在则重建。不加此参数时已存在直接报错 |
+| `--id-column` / `--embedding-column` | 自动推断 | 与 `load` 相同 |
+| `--id-offset` | `0` | 仅用于 fvecs / ivecs 转 parquet 时的起始 id |
+| `--batch-size` | `250000` | 读 parquet / 转 TexMex 时每批行数 |
+| `--index` | 关 | 写完后在 `embedding` 上建向量索引 |
+| `--index-type` | `IVF_PQ` | `IVF_PQ` / `IVF_HNSW_PQ` / `IVF_HNSW_SQ` |
+| `--metric` | `L2` | `L2` / `cosine` / `dot`。cosine 请自行保证向量已归一化 |
+| `--num-partitions` | `sqrt(rows)` | IVF 分区数 |
+| `--num-sub-vectors` | `dim/8` | PQ 子向量数；`dim` 能被 8 整除时最快 |
+
+小数据集（几百行）不必 `--index`，brute-force KNN 就够。IVF_PQ 要求行数明显多于分区数，数据太少建索引会失败。
+
+## query-lance
+
+对 `to-lance` 写出的 dataset 做查询。默认不传查询向量时，用表里第一行的 embedding 做自检索（自己应排在第一）。无索引或加 `--no-index` 时 `_distance` 约为 `0`；已建 IVF_PQ 且未加 `--refine-factor` 时距离是近似值，不必等于 0。ivecs / ground-truth 表没有 embedding，只能 `--sql`。
+
+```bash
+# 自检索：用第一行当 query，返回 top-10
+python -m iceberg_vector_loader query-lance \
+  --dataset ./sift10m.lance \
+  --k 10
+
+# 指定 id 的向量当 query
+python -m iceberg_vector_loader query-lance \
+  --dataset ./sift10m.lance \
+  --query-id 42 \
+  --k 5
+
+# 手写 query 向量（逗号分隔或 JSON list）
+python -m iceberg_vector_loader query-lance \
+  --dataset ./sift10m.lance \
+  --query-vector '0.1,0.2,0.3' \
+  --k 10
+
+# 随机抽一行当 query
+python -m iceberg_vector_loader query-lance \
+  --dataset ./sift10m.lance \
+  --sample --seed 0 \
+  --k 10
+```
+
+带 metadata 过滤的向量检索（先过滤再搜）：
+
+```bash
+python -m iceberg_vector_loader query-lance \
+  --dataset ./sift10m.lance \
+  --query-id 0 \
+  --filter 'id < 1000' \
+  --k 10
+```
+
+已建 IVF 索引时，可用 `--nprobes` / `--refine-factor` 调召回，或 `--no-index` 强制精确 KNN：
+
+```bash
+python -m iceberg_vector_loader query-lance \
+  --dataset ./sift1m.lance \
+  --query-id 0 \
+  --k 10 \
+  --nprobes 16 \
+  --refine-factor 5
+```
+
+普通 SQL（不是向量检索）。ivecs / ground-truth 表只能走这条路径：
+
+```bash
+python -m iceberg_vector_loader query-lance \
+  --dataset ./sift10m.lance \
+  --sql 'SELECT id FROM dataset LIMIT 5'
+
+python -m iceberg_vector_loader query-lance \
+  --dataset ./sift_gt.lance \
+  --sql 'SELECT id, neighbors FROM dataset LIMIT 5'
+```
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--dataset` | 必填 | Lance dataset 目录 |
+| `--query-id` | 无 | 用该行 embedding 当 query |
+| `--query-vector` | 无 | 逗号分隔或 JSON 数组 |
+| `--sample` | 关 | 随机抽一行当 query |
+| `--k` | `10` | 近邻个数 |
+| `--columns` | 除 `embedding` 外全部 | 逗号分隔；向量检索会额外带 `_distance` |
+| `--include-embedding` | 关 | 结果里带上 embedding 列 |
+| `--filter` | 无 | SQL 谓词，作为向量检索的 prefilter |
+| `--sql` | 无 | 跑 `SELECT ... FROM dataset ...`，不再做 KNN |
+| `--metric` | `L2` | 应与建索引时的 metric 一致 |
+| `--nprobes` | Lance 默认 | IVF 探测的分区数 |
+| `--refine-factor` | 无 | ANN 多取 `k * refine_factor` 再按真实距离重排 |
+| `--no-index` | 关 | 忽略已有向量索引，精确扫描 |
+
+默认不打印 embedding（太长）。距离列是 `_distance`：L2 时是平方欧氏距离。精确 KNN 下 query 自己命中约为 `0`；IVF_PQ 未 refine 时是近似距离。
+
+### Python 例子
+
+```python
+import lance
+from iceberg_vector_loader import convert_to_lance, query_lance
+
+convert_to_lance("/data/sift_base.parquet", "./sift.lance", overwrite=True)
+
+# 1) 用 id=0 的向量做 top-5
+hits = query_lance("./sift.lance", query_id=0, k=5)
+print(hits.table.to_pydict())
+
+# 2) 精确 KNN（不用索引）+ 过滤
+hits = query_lance(
+    "./sift.lance",
+    query_id=0,
+    k=10,
+    filter_expr="id < 10000",
+    use_index=False,
+)
+
+# 3) 直接用 pylance：SQL、随机读、向量检索
+ds = lance.dataset("./sift.lance")
+print(ds.count_rows(), ds.schema)
+print(ds.sql("SELECT id FROM dataset LIMIT 5").build().to_batch_records())
+print(ds.take([0, 100, 500], columns=["id"]))
+print(
+    ds.to_table(
+        columns=["id", "_distance"],
+        nearest={"column": "embedding", "q": [0.1] * ds.schema.field("embedding").type.list_size, "k": 10},
+    )
+)
+```
 
 ## load
 
@@ -189,7 +373,7 @@ python -m iceberg_vector_loader load \
 |---|---|---|
 | `--namespace` | 必填 | Iceberg namespace |
 | `--table` | 必填 | 表名，不能含 `.` |
-| `--input` | 必填 | `.fvecs` / `.parquet` / parquet 目录 / parquet glob（glob 必须加引号） |
+| `--input` | 必填 | `.fvecs` / `.parquet` / parquet 目录 / parquet glob（glob 必须加引号）。不接受 `.ivecs` |
 | `--warehouse` | `warehouse` | 本地 Hadoop catalog 根目录 |
 | `--output` | 见下文 | fvecs 转换或规范化后的 parquet 落盘路径 |
 | `--overwrite` | 关 | 先 `DROP TABLE ... PURGE` 再建表。不加此参数时，表已存在则直接报错退出 |

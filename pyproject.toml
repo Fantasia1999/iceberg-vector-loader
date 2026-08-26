@@ -5,13 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "iceberg-vector-loader"
 version = "0.1.0"
-description = "Load fvecs / parquet embeddings into a Spark-native Iceberg v3 table."
+description = "Load fvecs / parquet embeddings into a Spark-native Iceberg v3 table, or convert fvecs / ivecs / parquet to Lance."
 readme = "README.md"
 requires-python = ">=3.11,<3.15"
 dependencies = [
     "pyarrow>=17",
     "numpy>=1.26",
     "click>=8.1",
+    "pylance>=10",
 ]
 
 [project.optional-dependencies]
