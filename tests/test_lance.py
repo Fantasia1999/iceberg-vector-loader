@@ -35,7 +35,9 @@ def test_convert_parquet_to_lance_and_knn(tmp_path: Path) -> None:
     assert dataset.schema.field(EMBEDDING_FIELD).type.list_size == 2
     assert dataset.schema.names == ["id", "embedding", "label"]
 
-    knn = query_lance(dest, query_id=10, k=2)
+    queries = tmp_path / "queries.parquet"
+    _write_vectors(queries, [10], column="embedding")
+    knn = query_lance(dest, queries_path=queries, query_id=10, k=2)
     assert knn.query_id == 10
     assert knn.table.num_rows == 2
     assert knn.table["id"].to_pylist()[0] == 10
@@ -97,14 +99,42 @@ def test_format_query_vector_preview_and_verbose() -> None:
     assert "11" in full
 
 
-def test_self_search_first_row(tmp_path: Path) -> None:
+def test_query_id_requires_queries(tmp_path: Path) -> None:
     src = tmp_path / "vecs.parquet"
     dest = tmp_path / "vecs.lance"
+    queries = tmp_path / "queries.parquet"
     _write_vectors(src, [7, 8, 9])
+    _write_vectors(queries, [7])
     convert_to_lance(src, dest)
-    knn = query_lance(dest, k=1)
+    with pytest.raises(ValueError, match="--queries is required"):
+        query_lance(dest, query_id=7, k=1)
+    with pytest.raises(ValueError, match="--query-id is required"):
+        query_lance(dest, queries_path=queries, k=1)
+    knn = query_lance(dest, queries_path=queries, query_id=7, k=1, use_index=False)
     assert knn.query_id == 7
     assert knn.table["id"].to_pylist() == [7]
+
+
+def test_query_from_separate_parquet(tmp_path: Path) -> None:
+    base = tmp_path / "base.parquet"
+    queries = tmp_path / "sift_query.parquet"
+    dest = tmp_path / "base.lance"
+    _write_vectors(base, [0, 1, 2])
+    pq.write_table(
+        pa.table(
+            {
+                "id": pa.array([0], type=pa.int64()),
+                "embedding": pa.array([[2.0, 1.0]], type=pa.list_(pa.float32())),
+            }
+        ),
+        queries,
+    )
+    convert_to_lance(base, dest)
+    knn = query_lance(dest, queries_path=queries, query_id=0, k=1, use_index=False)
+    assert knn.queries_path == str(queries.resolve())
+    assert knn.query_id == 0
+    np.testing.assert_allclose(knn.query_vector, [2.0, 1.0])
+    assert knn.table["id"].to_pylist() == [2]
 
 
 def test_include_embedding_column(tmp_path: Path) -> None:
@@ -112,7 +142,9 @@ def test_include_embedding_column(tmp_path: Path) -> None:
     dest = tmp_path / "vecs.lance"
     _write_vectors(src, [0, 1])
     convert_to_lance(src, dest)
-    knn = query_lance(dest, query_id=0, k=1, include_embedding=True)
+    queries = tmp_path / "queries.parquet"
+    _write_vectors(queries, [0])
+    knn = query_lance(dest, queries_path=queries, query_id=0, k=1, include_embedding=True, use_index=False)
     assert EMBEDDING_FIELD in knn.table.column_names
     np.testing.assert_allclose(knn.table[EMBEDDING_FIELD][0].as_py(), [0.0, 1.0])
     assert knn.query_vector == (0.0, 1.0)
@@ -145,7 +177,17 @@ def test_to_lance_fvecs_goes_through_parquet(tmp_path: Path) -> None:
     assert result.dimension == 2
     dataset = lance.dataset(dest)
     assert dataset.schema.names == ["id", "embedding"]
-    knn = query_lance(dest, query_id=0, k=1)
+    queries = tmp_path / "queries.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "id": pa.array([0], type=pa.int64()),
+                "embedding": pa.array([[1.0, 0.0]], type=pa.list_(pa.float32())),
+            }
+        ),
+        queries,
+    )
+    knn = query_lance(dest, queries_path=queries, query_id=0, k=1, use_index=False)
     assert knn.table["id"].to_pylist() == [0]
 
 

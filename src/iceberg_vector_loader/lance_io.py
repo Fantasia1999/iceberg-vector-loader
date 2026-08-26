@@ -10,8 +10,9 @@ from time import perf_counter
 import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
+import pyarrow.parquet as pq
 
-from iceberg_vector_loader.fvecs import convert_texmex_to_parquet
+from iceberg_vector_loader.fvecs import batch_to_arrow, convert_texmex_to_parquet, iter_fvecs
 from iceberg_vector_loader.paths import resolve_local_path
 from iceberg_vector_loader.prepare import (
     DEFAULT_BATCH_SIZE,
@@ -190,6 +191,7 @@ class LanceQueryResult:
     table: pa.Table
     query_id: int | None
     query_vector: tuple[float, ...] | None
+    queries_path: str | None
     k: int | None
     sql: str | None
     elapsed_seconds: float
@@ -407,26 +409,76 @@ def _open_dataset(dataset_path: str | Path):
     return lance.dataset(path)
 
 
-def _row_embedding(dataset, query_id: int | None, sample: bool, seed: int | None) -> tuple[int, np.ndarray]:
+def _is_lance_dataset(path: Path) -> bool:
+    if not path.is_dir():
+        return False
+    if path.suffix.lower() == ".lance":
+        return True
+    return (path / "_versions").is_dir()
+
+
+def _table_from_query_file(path: Path) -> pa.Table:
+    if is_fvecs(path):
+        chunks = [batch_to_arrow(ids, vectors) for ids, vectors in iter_fvecs(path)]
+        if not chunks:
+            raise ValueError(f"{path} contained no rows")
+        table = pa.concat_tables(chunks)
+    elif is_parquet_file(path):
+        table = pq.read_table(path)
+    else:
+        raise ValueError(f"unsupported query input {path}; expected .fvecs, .parquet, or a Lance dataset")
+    mapping = infer_column_mapping(table.schema)
+    normalized, _dim = normalize_table(table, mapping)
+    return normalized
+
+
+def _load_query_source(queries_path: str | Path):
+    path = resolve_local_path(queries_path)
+    if not path.exists():
+        raise FileNotFoundError(path)
+    if _is_lance_dataset(path):
+        return _open_dataset(path)
+    return _table_from_query_file(path)
+
+
+def _pick_row(table: pa.Table, query_id: int | None, sample: bool, seed: int | None) -> pa.Table:
+    if table.num_rows == 0:
+        raise ValueError("query source is empty")
+    if query_id is not None:
+        filtered = table.filter(pc.equal(table[ID_FIELD], int(query_id)))
+        if filtered.num_rows == 0:
+            raise ValueError(f"no row with {ID_FIELD}={query_id} in query source")
+        return filtered.slice(0, 1)
+    if sample:
+        rng = random.Random(seed)
+        offset = rng.randrange(table.num_rows)
+        return table.slice(offset, 1)
+    return table.slice(0, 1)
+
+
+def _row_embedding(source, query_id: int | None, sample: bool, seed: int | None) -> tuple[int, np.ndarray]:
     if query_id is not None and sample:
         raise ValueError("pass only one of query_id or sample")
     columns = [ID_FIELD, EMBEDDING_FIELD]
-    if query_id is not None:
-        table = dataset.to_table(columns=columns, filter=f"{ID_FIELD} = {int(query_id)}")
-        if table.num_rows == 0:
-            raise ValueError(f"no row with {ID_FIELD}={query_id}")
-        row = table.slice(0, 1)
-    elif sample:
-        total = dataset.count_rows()
-        if total == 0:
-            raise ValueError("dataset is empty")
-        rng = random.Random(seed)
-        offset = rng.randrange(total)
-        row = dataset.to_table(columns=columns, offset=offset, limit=1)
+    if isinstance(source, pa.Table):
+        row = _pick_row(source.select(columns), query_id=query_id, sample=sample, seed=seed)
     else:
-        row = dataset.to_table(columns=columns, limit=1)
-        if row.num_rows == 0:
-            raise ValueError("dataset is empty")
+        if query_id is not None:
+            table = source.to_table(columns=columns, filter=f"{ID_FIELD} = {int(query_id)}")
+            if table.num_rows == 0:
+                raise ValueError(f"no row with {ID_FIELD}={query_id}")
+            row = table.slice(0, 1)
+        elif sample:
+            total = source.count_rows()
+            if total == 0:
+                raise ValueError("dataset is empty")
+            rng = random.Random(seed)
+            offset = rng.randrange(total)
+            row = source.to_table(columns=columns, offset=offset, limit=1)
+        else:
+            row = source.to_table(columns=columns, limit=1)
+            if row.num_rows == 0:
+                raise ValueError("dataset is empty")
     chosen_id = int(row[ID_FIELD][0].as_py())
     vector = np.asarray(row[EMBEDDING_FIELD][0].as_py(), dtype=np.float32)
     return chosen_id, vector
@@ -453,6 +505,7 @@ def _select_columns(dataset, columns: list[str] | None, include_embedding: bool,
 def query_lance(
     dataset_path: str | Path,
     *,
+    queries_path: str | Path | None = None,
     query_vector: list[float] | np.ndarray | None = None,
     query_id: int | None = None,
     sample: bool = False,
@@ -473,14 +526,15 @@ def query_lance(
     dataset = _open_dataset(dataset_path)
 
     if sql:
-        if query_vector is not None or query_id is not None:
-            raise ValueError("--sql cannot be combined with --query-vector / --query-id")
+        if query_vector is not None or query_id is not None or queries_path is not None:
+            raise ValueError("--sql cannot be combined with --queries / --query-vector / --query-id")
         batches = dataset.sql(sql).build().to_batch_records()
         table = pa.Table.from_batches(batches) if batches else dataset.head(0)
         return LanceQueryResult(
             table=table,
             query_id=None,
             query_vector=None,
+            queries_path=None,
             k=None,
             sql=sql,
             elapsed_seconds=perf_counter() - started,
@@ -493,12 +547,23 @@ def query_lance(
         )
 
     chosen_id = None
+    resolved_queries = str(resolve_local_path(queries_path)) if queries_path is not None else None
     if query_vector is not None:
-        if query_id is not None or sample:
-            raise ValueError("pass only one of query_vector, query_id, or sample")
+        if query_id is not None or sample or queries_path is not None:
+            raise ValueError("pass only one of --query-vector or --queries plus --query-id")
         vector = np.asarray(query_vector, dtype=np.float32)
     else:
-        chosen_id, vector = _row_embedding(dataset, query_id=query_id, sample=sample, seed=seed)
+        if queries_path is None:
+            raise ValueError(
+                "--queries is required; query vectors cannot be taken from the base dataset. "
+                "Pass --queries with --query-id, or pass --query-vector."
+            )
+        if query_id is None and not sample:
+            raise ValueError("--query-id is required with --queries")
+        if query_id is not None and sample:
+            raise ValueError("pass only one of --query-id or --sample")
+        source = _load_query_source(queries_path)
+        chosen_id, vector = _row_embedding(source, query_id=query_id, sample=sample, seed=seed)
 
     dim = vector.shape[-1]
     field = dataset.schema.field(EMBEDDING_FIELD)
@@ -527,6 +592,7 @@ def query_lance(
         table=table,
         query_id=chosen_id,
         query_vector=tuple(float(x) for x in np.asarray(vector, dtype=np.float32).ravel()),
+        queries_path=resolved_queries,
         k=k,
         sql=None,
         elapsed_seconds=perf_counter() - started,

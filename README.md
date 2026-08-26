@@ -197,24 +197,23 @@ python -m iceberg_vector_loader to-lance \
 
 ## query-lance
 
-对 `to-lance` 写出的 dataset 做查询。默认不传查询向量时，用表里第一行的 embedding 做自检索（自己应排在第一）。无索引或加 `--no-index` 时 `_distance` 约为 `0`；已建 IVF_PQ 且未加 `--refine-factor` 时距离是近似值，不必等于 0。ivecs / ground-truth 表没有 embedding，只能 `--sql`。
+对 `to-lance` 写出的 **底库** dataset 做查询。向量检索必须同时给 `--queries` 和 `--query-id`：query 向量只来自独立 query 集，不能从底库取行。
+
+SIFT：底库 `sift_base.lance`，query 用 `sift_query.parquet`（再和 `sift_groundtruth.ivecs` 对召回）。
 
 ```bash
-# 自检索：用第一行当 query，返回 top-10
+# 用 query 集 id=0 去搜 base
 python -m iceberg_vector_loader query-lance \
-  --dataset ./sift10m.lance \
+  --dataset ./sift_base.lance \
+  --queries ./sift_query.parquet \
+  --query-id 0 \
   --k 10
-
-# 指定 id 的向量当 query（默认只打印 query 向量前 8 维）
-python -m iceberg_vector_loader query-lance \
-  --dataset ./sift10m.lance \
-  --query-id 42 \
-  --k 5
 
 # 打印完整 query 向量
 python -m iceberg_vector_loader query-lance \
-  --dataset ./sift10m.lance \
-  --query-id 42 \
+  --dataset ./sift_base.lance \
+  --queries ./sift_query.parquet \
+  --query-id 0 \
   --k 5 \
   --verbose
 
@@ -224,9 +223,10 @@ python -m iceberg_vector_loader query-lance \
   --query-vector '0.1,0.2,0.3' \
   --k 10
 
-# 随机抽一行当 query
+# 从 query 集随机抽一条
 python -m iceberg_vector_loader query-lance \
-  --dataset ./sift10m.lance \
+  --dataset ./sift_base.lance \
+  --queries ./sift_query.parquet \
   --sample --seed 0 \
   --k 10
 ```
@@ -235,7 +235,8 @@ python -m iceberg_vector_loader query-lance \
 
 ```bash
 python -m iceberg_vector_loader query-lance \
-  --dataset ./sift10m.lance \
+  --dataset ./sift_base.lance \
+  --queries ./sift_query.parquet \
   --query-id 0 \
   --filter 'id < 1000' \
   --k 10
@@ -245,7 +246,8 @@ python -m iceberg_vector_loader query-lance \
 
 ```bash
 python -m iceberg_vector_loader query-lance \
-  --dataset ./sift1m.lance \
+  --dataset ./sift_base.lance \
+  --queries ./sift_query.parquet \
   --query-id 0 \
   --k 10 \
   --nprobes 16 \
@@ -266,10 +268,11 @@ python -m iceberg_vector_loader query-lance \
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `--dataset` | 必填 | Lance dataset 目录 |
-| `--query-id` | 无 | 用该行 embedding 当 query；结果头里会打印该向量 |
-| `--query-vector` | 无 | 逗号分隔或 JSON 数组 |
-| `--sample` | 关 | 随机抽一行当 query |
+| `--dataset` | 必填 | 要搜索的底库 Lance dataset（如 `sift_base.lance`） |
+| `--queries` | 与 `--query-id` 同时必填 | 独立 query 集：`.parquet` / `.fvecs` / Lance。SIFT 用 `sift_query.parquet` |
+| `--query-id` | 与 `--queries` 同时必填 | query 集里的行 id，取该行 embedding 去搜底库 |
+| `--query-vector` | 无 | 手写向量（逗号分隔或 JSON）；与 `--queries` 互斥 |
+| `--sample` | 关 | 从 `--queries` 随机抽一行，代替 `--query-id` |
 | `--k` | `10` | 近邻个数 |
 | `--columns` | 除 `embedding` 外全部 | 逗号分隔；向量检索会额外带 `_distance` |
 | `--include-embedding` | 关 | 结果里带上 embedding 列 |
@@ -289,15 +292,16 @@ python -m iceberg_vector_loader query-lance \
 import lance
 from iceberg_vector_loader import convert_to_lance, query_lance
 
-convert_to_lance("/data/sift_base.parquet", "./sift.lance", overwrite=True)
+convert_to_lance("/data/sift_base.parquet", "./sift_base.lance", overwrite=True)
 
-# 1) 用 id=0 的向量做 top-5
-hits = query_lance("./sift.lance", query_id=0, k=5)
+# 1) 用 query 集 id=0 去搜底库
+hits = query_lance("./sift_base.lance", queries_path="./sift_query.parquet", query_id=0, k=5)
 print(hits.table.to_pydict())
 
 # 2) 精确 KNN（不用索引）+ 过滤
 hits = query_lance(
-    "./sift.lance",
+    "./sift_base.lance",
+    queries_path="./sift_query.parquet",
     query_id=0,
     k=10,
     filter_expr="id < 10000",

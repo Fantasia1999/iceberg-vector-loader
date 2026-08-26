@@ -224,10 +224,17 @@ def to_lance_cmd(
 
 
 @main.command("query-lance")
-@click.option("--dataset", "dataset_path", required=True, type=click.Path(), help="Lance dataset directory.")
-@click.option("--query-id", type=int, default=None, help="Use this row's embedding as the query vector.")
+@click.option("--dataset", "dataset_path", required=True, type=click.Path(), help="Lance dataset to search (e.g. sift_base.lance).")
+@click.option(
+    "--queries",
+    "queries_path",
+    default=None,
+    type=click.Path(),
+    help="Query set: parquet / fvecs / Lance (e.g. sift_query.parquet). Required with --query-id.",
+)
+@click.option("--query-id", type=int, default=None, help="Row id in --queries. Required with --queries unless --sample.")
 @click.option("--query-vector", default=None, help="Query vector as comma-separated floats or a JSON list.")
-@click.option("--sample", is_flag=True, help="Use a random row's embedding as the query vector.")
+@click.option("--sample", is_flag=True, help="Pick a random row from --queries instead of --query-id.")
 @click.option("--seed", type=int, default=None, help="RNG seed for --sample.")
 @click.option("--k", type=int, default=10, show_default=True, help="Number of nearest neighbors.")
 @click.option("--columns", default=None, help="Comma-separated columns to return. Default: all except embedding.")
@@ -247,6 +254,7 @@ def to_lance_cmd(
 @click.option("--verbose", is_flag=True, help="Print the full query vector instead of a truncated preview.")
 def query_lance_cmd(
     dataset_path: str,
+    queries_path: str | None,
     query_id: int | None,
     query_vector: str | None,
     sample: bool,
@@ -272,6 +280,7 @@ def query_lance_cmd(
     try:
         result = query_lance(
             dataset_path,
+            queries_path=queries_path,
             query_vector=vector,
             query_id=query_id,
             sample=sample,
@@ -297,6 +306,8 @@ def query_lance_cmd(
         header.append(f"sql             {result.sql}")
     else:
         header.append(f"k               {result.k}")
+        if result.queries_path is not None:
+            header.append(f"queries         {result.queries_path}")
         if result.query_id is not None:
             header.append(f"query-id        {result.query_id}")
         if result.query_vector is not None:
